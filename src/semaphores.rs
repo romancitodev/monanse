@@ -21,15 +21,23 @@ impl Semaphore {
         Self(AtomicI32::new(capacity), Condvar::new(), Mutex::new(()))
     }
 
+    pub fn increment(&self) {
+        self.increment_many(1);
+    }
+
     /// Atomically increments the semaphore by a specific count
-    pub fn increment_by(&self, count: i32) {
+    pub fn increment_many(&self, count: i32) {
         self.0.fetch_add(count, Ordering::Relaxed);
         self.1.notify_all();
     }
 
+    pub fn decrement(&self) {
+        self.decrement_many(1);
+    }
+
     /// Atomically decrements the semaphore by a specific count (all-or-nothing)
     /// If the semaphore doesn't have enough permits, it waits until it does
-    pub fn decrement_by(&self, count: i32) {
+    pub fn decrement_many(&self, count: i32) {
         let mut guard = self.2.lock().unwrap();
         loop {
             let val = self.0.load(Ordering::Relaxed);
@@ -49,8 +57,18 @@ impl Semaphore {
 
     /// Acquires multiple permits atomically and returns a RAII guard
     /// The guard will automatically release the permits when dropped
-    pub fn acquire(&self, count: i32) -> SemaphoreGuard<'_> {
-        self.decrement_by(count);
+    pub fn acquire(&self) -> SemaphoreGuard<'_> {
+        self.decrement();
+        SemaphoreGuard {
+            semaphore: self,
+            count: 1,
+        }
+    }
+
+    /// Acquires multiple permits atomically and returns a RAII guard
+    /// The guard will automatically release the permits when dropped
+    pub fn acquire_many(&self, count: i32) -> SemaphoreGuard<'_> {
+        self.decrement_many(count);
         SemaphoreGuard {
             semaphore: self,
             count,
@@ -66,7 +84,7 @@ pub struct SemaphoreGuard<'a> {
 
 impl<'a> Drop for SemaphoreGuard<'a> {
     fn drop(&mut self) {
-        self.semaphore.increment_by(self.count);
+        self.semaphore.increment_many(self.count);
     }
 }
 
@@ -149,7 +167,7 @@ impl Seq for Process {
 
         // Acquire all permits atomically for each unique semaphore
         for (_, (count, sem)) in sem_counts {
-            sem.decrement_by(count);
+            sem.decrement_many(count);
         }
     }
 
@@ -167,7 +185,7 @@ impl Seq for Process {
 
         // Release all permits atomically for each unique semaphore
         for (_, (count, sem)) in sem_counts {
-            sem.increment_by(count);
+            sem.increment_many(count);
         }
     }
 

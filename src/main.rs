@@ -47,7 +47,7 @@ fn semaphores() {
     );
 
     let sequence = seq![
-        process_b, process_b, process_a, process_a, process_a, process_a
+        process_a, process_b, process_a, process_a, process_a, process_b
     ];
     sequence.run();
 }
