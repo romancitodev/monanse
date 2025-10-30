@@ -36,7 +36,6 @@ fn main() {
     semaphores();
 }
 
-// Use case
 fn semaphores() {
     let a = Arc::new(Semaphore::new(2));
     let b = Arc::new(Semaphore::new(0));
