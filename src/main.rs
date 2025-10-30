@@ -33,7 +33,26 @@ pub fn monitors() {
 
 fn main() {
     // monitors();
-    semaphores();
+    // semaphores();
+    complex_sequence();
+}
+
+fn complex_sequence() {
+    let a = Arc::new(Semaphore::new(2));
+    let bc = Arc::new(Semaphore::new(0));
+    let process_a = Arc::new(
+        Process::new("a")
+            .wait_on_many_borrowed(&[&a, &a])
+            .release_on_many_borrowed(&[&bc, &bc]),
+    );
+    let process_b = Arc::new(Process::new("b").wait_on(&bc).release_on(&a));
+    let process_c = Arc::new(Process::new("c").wait_on(&bc).release_on(&a));
+
+    let sequence = seq![
+        process_c, process_b, process_a, process_b, process_c, process_a
+    ];
+
+    sequence.run();
 }
 
 fn semaphores() {

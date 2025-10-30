@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 use std::sync::{
-    Arc, Condvar, Mutex,
+    Arc,
     atomic::{AtomicI32, Ordering},
 };
+
+use parking_lot::{Condvar, Mutex};
 
 /// Agnostic implementation of a semaphore for synchronization between threads.
 ///
@@ -38,7 +40,7 @@ impl Semaphore {
     /// Atomically decrements the semaphore by a specific count (all-or-nothing)
     /// If the semaphore doesn't have enough permits, it waits until it does
     pub fn decrement_many(&self, count: i32) {
-        let mut guard = self.2.lock().unwrap();
+        let mut guard = self.2.lock();
         loop {
             let val = self.0.load(Ordering::Relaxed);
             if val >= count {
@@ -50,7 +52,7 @@ impl Semaphore {
                     break;
                 }
             } else {
-                guard = self.1.wait(guard).unwrap();
+                self.1.wait(&mut guard);
             }
         }
     }
