@@ -39,7 +39,7 @@ impl BufferMonitor {
         signal(&self.full);
     }
 
-    pub fn consume(&self) -> bool {
+    pub fn finish(&self) -> bool {
         let mut buffer = self.buffer.lock();
         if buffer.len() == 0 {
             println!("Esperando a que haya un item por lo menos");

@@ -13,7 +13,7 @@ pub fn monitors() {
     let other = std::thread::spawn({
         let monitor = Arc::clone(&monitor);
         move || {
-            while !monitor.consume() {}
+            while !monitor.finish() {}
         }
     });
 
@@ -32,17 +32,20 @@ pub fn monitors() {
 }
 
 fn main() {
+    // monitors();
     semaphores();
 }
 
 // Use case
 fn semaphores() {
-    let a = Semaphore::new(2);
-    let b = Semaphore::new(0);
-    let process_a = Process::new("a").wait_on(&a).release_on(&b);
-    let process_b = Process::new("b")
-        .wait_on_many_borrowed(&[&b, &b])
-        .release_on_many_borrowed(&[&a, &a]);
+    let a = Arc::new(Semaphore::new(2));
+    let b = Arc::new(Semaphore::new(0));
+    let process_a = Arc::new(Process::new("a").wait_on(&a).release_on(&b));
+    let process_b = Arc::new(
+        Process::new("b")
+            .wait_on_many_borrowed(&[&b, &b])
+            .release_on_many_borrowed(&[&a, &a]),
+    );
 
     let sequence = seq![
         process_b, process_b, process_a, process_a, process_a, process_a
