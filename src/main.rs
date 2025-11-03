@@ -1,8 +1,12 @@
 use monitor::*;
 use std::sync::Arc;
 
-use crate::semaphores::{Process, Semaphore};
+use crate::{
+    examples::sequence,
+    semaphores::{Process, Semaphore},
+};
 
+mod examples;
 mod monitor;
 mod semaphores;
 mod utils;
@@ -34,7 +38,8 @@ pub fn monitors() {
 fn main() {
     // monitors();
     // semaphores();
-    complex_sequence();
+    // complex_sequence();
+    sequence();
 }
 
 fn complex_sequence() {
@@ -49,7 +54,7 @@ fn complex_sequence() {
     let process_c = Arc::new(Process::new("c").wait_on(&bc).release_on(&a));
 
     let sequence = seq![
-        process_c, process_b, process_a, process_b, process_c, process_a
+        process_b, process_b, process_a, process_b, process_c, process_a
     ];
 
     sequence.run();
