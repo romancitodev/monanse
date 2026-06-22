@@ -8,19 +8,18 @@ use std::sync::{
 
 use parking_lot::{Condvar, Mutex};
 
-/// Agnostic implementation of a semaphore for synchronization between threads.
-///
-/// Consists of an Atomic Counter, a Condvar and a Mutex.
-///
-/// Clone isn't satisfied for [`Condvar`] and [`AtomicI32`].
-/// So you must [`Arc::clone`] explicitly
-pub struct Semaphore(AtomicI32, Condvar, Mutex<()>);
+pub(crate) struct InnerSemaphore(AtomicI32, Condvar, Mutex<()>);
 
-pub type SharedSemaphore = Arc<Semaphore>;
+#[derive(Clone)]
+pub struct Semaphore(Arc<InnerSemaphore>);
 
 impl Semaphore {
     pub fn new(capacity: i32) -> Self {
-        Self(AtomicI32::new(capacity), Condvar::new(), Mutex::new(()))
+        Self(Arc::new(InnerSemaphore(
+            AtomicI32::new(capacity),
+            Condvar::new(),
+            Mutex::new(()),
+        )))
     }
 
     pub fn increment(&self) {
@@ -29,8 +28,8 @@ impl Semaphore {
 
     /// Atomically increments the semaphore by a specific count
     pub fn increment_many(&self, count: i32) {
-        self.0.fetch_add(count, Ordering::Relaxed);
-        self.1.notify_all();
+        self.0.0.fetch_add(count, Ordering::Relaxed);
+        self.0.1.notify_all();
     }
 
     pub fn decrement(&self) {
@@ -40,11 +39,12 @@ impl Semaphore {
     /// Atomically decrements the semaphore by a specific count (all-or-nothing)
     /// If the semaphore doesn't have enough permits, it waits until it does
     pub fn decrement_many(&self, count: i32) {
-        let mut guard = self.2.lock();
+        let mut guard = self.0.2.lock();
         loop {
-            let val = self.0.load(Ordering::Relaxed);
+            let val = self.0.0.load(Ordering::Relaxed);
             if val >= count {
                 if self
+                    .0
                     .0
                     .compare_exchange(val, val - count, Ordering::Relaxed, Ordering::Relaxed)
                     .is_ok()
@@ -52,7 +52,7 @@ impl Semaphore {
                     break;
                 }
             } else {
-                self.1.wait(&mut guard);
+                self.0.1.wait(&mut guard);
             }
         }
     }
@@ -76,6 +76,10 @@ impl Semaphore {
             count,
         }
     }
+
+    pub(crate) fn inner_ptr(&self) -> *const InnerSemaphore {
+        Arc::as_ptr(&self.0)
+    }
 }
 
 /// RAII guard that automatically releases semaphore permits when dropped
@@ -84,66 +88,94 @@ pub struct SemaphoreGuard<'a> {
     count: i32,
 }
 
-impl<'a> Drop for SemaphoreGuard<'a> {
+impl Drop for SemaphoreGuard<'_> {
     fn drop(&mut self) {
         self.semaphore.increment_many(self.count);
     }
 }
 
 #[derive(Clone)]
-pub struct Process {
+struct InnerProcess {
     pub name: String,
-    pub wait_on: Vec<SharedSemaphore>,
-    pub release_on: Vec<SharedSemaphore>,
+    pub wait_on: Vec<Semaphore>,
+    pub release_on: Vec<Semaphore>,
 }
+
+#[derive(Clone)]
+pub struct Process(Arc<InnerProcess>);
 
 impl Process {
     pub fn new(name: impl Into<String>) -> Self {
-        Self {
+        Self(Arc::new(InnerProcess {
             name: name.into(),
             wait_on: vec![],
             release_on: vec![],
-        }
+        }))
     }
 
+    #[must_use]
     /// Adds a semaphore to wait on before executing
-    pub fn wait_on(mut self, sem: &SharedSemaphore) -> Self {
-        self.wait_on.push(Arc::clone(sem));
+    pub fn wait_on(mut self, sem: &Semaphore) -> Self {
+        // We need to mutate the inner process, but we only have an Arc.
+        // During the building phase, it's safe to assume we can unwrap or clone if needed,
+        // but typically builders work on owned data.
+        // Since we are changing the design to Arc internally, the builder pattern
+        // that takes `mut self` is slightly tricky if we already shared it.
+        // However, usually builders are used before sharing.
+        // We can use Arc::make_mut to get mutable access if we are the only owner.
+
+        let inner = Arc::make_mut(&mut self.0);
+        inner.wait_on.push(sem.clone());
         self
     }
 
     /// Adds multiple semaphores to wait on before executing
-    pub fn wait_on_many(mut self, sems: &[SharedSemaphore]) -> Self {
-        self.wait_on.extend(sems.iter().cloned());
+    pub fn wait_on_many(mut self, sems: &[Semaphore]) -> Self {
+        let inner = Arc::make_mut(&mut self.0);
+        inner.wait_on.extend(sems.iter().cloned());
         self
     }
 
     /// Adds multiple borrowed semaphores to wait on before executing
-    pub fn wait_on_many_borrowed(mut self, sems: &[&SharedSemaphore]) -> Self {
-        self.wait_on.extend(sems.iter().cloned().cloned());
+    pub fn wait_on_many_borrowed(mut self, sems: &[&Semaphore]) -> Self {
+        let inner = Arc::make_mut(&mut self.0);
+        inner.wait_on.extend(sems.iter().copied().cloned());
         self
     }
 
     /// Adds a semaphore to release after executing
-    pub fn release_on(mut self, sem: &SharedSemaphore) -> Self {
-        self.release_on.push(sem.clone());
+    pub fn release_on(mut self, sem: &Semaphore) -> Self {
+        let inner = Arc::make_mut(&mut self.0);
+        inner.release_on.push(sem.clone());
         self
     }
 
     /// Adds multiple semaphores to release after executing
-    pub fn release_on_many(mut self, sems: &[SharedSemaphore]) -> Self {
-        self.release_on.extend(sems.iter().cloned());
+    pub fn release_on_many(mut self, sems: &[Semaphore]) -> Self {
+        let inner = Arc::make_mut(&mut self.0);
+
+        // Just add them; we can optimize the storage in the InnerProcess independently
+        // Or we can optimize during insertion.
+        // The previous complex logic was inside release_on_many which is a builder method.
+        // It seems it was trying to deduplicate semaphores?
+        // The user complained about complexity: "el metodo release_on_many antes era re sencillo y pasó a ser complicado?"
+        // The complication was added in the previous turn to handle unique semaphores based on pointer identity
+        // because we were using Arc pointers.
+
+        // Let's go back to simple implementation.
+        inner.release_on.extend(sems.iter().cloned());
         self
     }
 
     /// Adds multiple borrowed semaphores to release after executing
-    pub fn release_on_many_borrowed(mut self, sems: &[&SharedSemaphore]) -> Self {
-        self.release_on.extend(sems.iter().cloned().cloned());
+    pub fn release_on_many_borrowed(mut self, sems: &[&Semaphore]) -> Self {
+        let inner = Arc::make_mut(&mut self.0);
+        inner.release_on.extend(sems.iter().copied().cloned());
         self
     }
 }
 
-pub type SharedProcess = Arc<Process>;
+pub type SharedProcess = Process;
 
 pub trait Seq: Send + Sync {
     fn wait(&self); // Wait until every semaphore is available
@@ -157,10 +189,12 @@ pub trait Seq: Send + Sync {
 impl Seq for Process {
     fn wait(&self) {
         // Group semaphores by identity and count how many times each appears
-        let mut sem_counts: HashMap<*const Semaphore, (i32, &SharedSemaphore)> = HashMap::new();
+        let mut sem_counts: HashMap<*const InnerSemaphore, (i32, &Semaphore)> = HashMap::new();
 
-        for sem in &self.wait_on {
-            let ptr = Arc::as_ptr(sem);
+        for sem in &self.0.wait_on {
+            // Access through .0
+            // We can provide a helper method to get the pointer to InnerSemaphore to avoid .0.0 ugliness
+            let ptr = sem.inner_ptr();
             sem_counts
                 .entry(ptr)
                 .and_modify(|(count, _)| *count += 1)
@@ -175,10 +209,11 @@ impl Seq for Process {
 
     fn release(&self) {
         // Group semaphores by identity and count how many times each appears
-        let mut sem_counts: HashMap<*const Semaphore, (i32, &SharedSemaphore)> = HashMap::new();
+        let mut sem_counts: HashMap<*const InnerSemaphore, (i32, &Semaphore)> = HashMap::new();
 
-        for sem in &self.release_on {
-            let ptr = Arc::as_ptr(sem);
+        for sem in &self.0.release_on {
+            // Access through .0
+            let ptr = sem.inner_ptr();
             sem_counts
                 .entry(ptr)
                 .and_modify(|(count, _)| *count += 1)
@@ -192,7 +227,7 @@ impl Seq for Process {
     }
 
     fn eval(&self) {
-        println!("{}", self.name);
+        println!("{}", self.0.name);
     }
 }
 
@@ -209,13 +244,13 @@ impl Sequence {
     }
 
     /// Adds an element to the sequence
-    pub fn add(mut self, element: Arc<Process>) -> Self {
+    pub fn add(mut self, element: Process) -> Self {
         self.elements.push(element);
         self
     }
 
     /// Adds multiple elements to the sequence
-    pub fn add_many(mut self, elements: impl IntoIterator<Item = Arc<Process>>) -> Self {
+    pub fn add_many(mut self, elements: impl IntoIterator<Item = Process>) -> Self {
         self.elements.extend(elements);
         self
     }
@@ -224,7 +259,7 @@ impl Sequence {
     pub fn run(&self) {
         let mut handles: Vec<std::thread::JoinHandle<()>> = vec![];
         for element in &self.elements {
-            let element = Arc::clone(&element);
+            let element = element.clone(); // Just clone the Process (which is Arc internal)
             let handle = std::thread::spawn(move || {
                 element.wait();
                 element.eval();

@@ -1,77 +1,45 @@
-use monitor::*;
+use monitor::{BoundedBuffer, Msg};
 use std::sync::Arc;
 
-use crate::{
-    examples::sequence,
-    semaphores::{Process, Semaphore},
-};
-
-mod examples;
+mod buffered_monitor;
 mod monitor;
 mod semaphores;
 mod utils;
 
-pub fn monitors() {
-    let monitor = Arc::new(BufferMonitor::with_capacity(3));
-
-    let other = std::thread::spawn({
-        let monitor = Arc::clone(&monitor);
-        move || {
-            while !monitor.finish() {}
+async fn collect_data(monitor: Arc<BoundedBuffer>) {
+    loop {
+        match monitor.try_remove() {
+            Some(Msg { content }) if content == "Finish" => {
+                println!("Finish");
+                break;
+            }
+            Some(item) => println!("{item:?}"),
+            None => {
+                tokio::task::yield_now().await;
+            }
         }
-    });
+    }
+}
 
-    let thread = std::thread::spawn({
-        let monitor = Arc::clone(&monitor);
-        move || {
-            (0..10).for_each(|i| monitor.insert(Msg::Data(i)));
-            monitor.insert(Msg::Finish);
-        }
+// I used async because of the contract with tokio
+#[allow(clippy::unused_async)]
+async fn push_data(monitor: Arc<BoundedBuffer>) {
+    (0..10).for_each(|i| {
+        monitor.insert(Msg::new(format!("Data {i}")));
+        println!("Inserted Data {i}");
     });
+    monitor.insert(Msg::new("Finish".to_owned()));
+}
 
-    _ = thread.join();
-    _ = other.join();
+#[tokio::main]
+async fn main() {
+    let monitor = Arc::new(BoundedBuffer::new(3));
+
+    let other = tokio::spawn(collect_data(Arc::clone(&monitor)));
+
+    let thread = tokio::spawn(push_data(Arc::clone(&monitor)));
+
+    let _ = tokio::join!(other, thread);
 
     println!("Good bye my fren");
-}
-
-fn main() {
-    // monitors();
-    // semaphores();
-    // complex_sequence();
-    sequence();
-}
-
-fn complex_sequence() {
-    let a = Arc::new(Semaphore::new(2));
-    let bc = Arc::new(Semaphore::new(0));
-    let process_a = Arc::new(
-        Process::new("a")
-            .wait_on_many_borrowed(&[&a, &a])
-            .release_on_many_borrowed(&[&bc, &bc]),
-    );
-    let process_b = Arc::new(Process::new("b").wait_on(&bc).release_on(&a));
-    let process_c = Arc::new(Process::new("c").wait_on(&bc).release_on(&a));
-
-    let sequence = seq![
-        process_b, process_b, process_a, process_b, process_c, process_a
-    ];
-
-    sequence.run();
-}
-
-fn semaphores() {
-    let a = Arc::new(Semaphore::new(2));
-    let b = Arc::new(Semaphore::new(0));
-    let process_a = Arc::new(Process::new("a").wait_on(&a).release_on(&b));
-    let process_b = Arc::new(
-        Process::new("b")
-            .wait_on_many_borrowed(&[&b, &b])
-            .release_on_many_borrowed(&[&a, &a]),
-    );
-
-    let sequence = seq![
-        process_a, process_b, process_a, process_a, process_a, process_b
-    ];
-    sequence.run();
 }

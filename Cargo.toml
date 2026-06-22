@@ -5,3 +5,7 @@ edition = "2024"
 
 [dependencies]
 parking_lot = "0.12.5"
+
+[dependencies.tokio]
+version = "1"
+features = ["macros", "rt-multi-thread"]
